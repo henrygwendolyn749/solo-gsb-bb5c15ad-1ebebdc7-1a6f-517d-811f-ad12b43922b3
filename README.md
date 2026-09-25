@@ -91,10 +91,15 @@ npm start            # 启动，访问 http://localhost:3000
    - **逐条执行**：一次只能执行**队首**一条并记录执行时间；提交时需带上目标条目 ID 与
      **预期进度**做乐观锁校验——重复提交、越序跳过、基于过期进度的请求一律返回 **409 冲突**，
      不会推进下一条。
-   - **撤回**：仅可撤回**最后执行的一条**，撤回后该条可重新执行。
-   - **刷新恢复**：进度与执行记录全部存在服务端，刷新页面后重新打开场次即恢复。
+   - **漏执行登记**：队首提示无法按计划执行时，点「⚠ 登记漏执行」填写**原因**并确认，
+     该条被标记为**漏执行**并继续处理下一条。漏执行与正常执行**共用同一进度与预期进度校验**，
+     重复提交、越序或过期请求同样返回 **409**；原因随场次记录保存，在队列与执行记录中展示。
+   - **撤回**：仅可撤回**最后处理的一条**（正常执行或漏执行），撤回后该条回到待处理、可重新执行或重新登记。
+   - **刷新恢复**：进度与处理记录全部存在服务端，刷新页面后重新打开场次即恢复。
    - **快照不可变**：剧本改版或提示后续被编辑/删除，**均不改变既有场次**，
      可随时在右侧「历次场次」中查看每一场的冻结快照与执行记录。
+   - **完成判定**：全部条目处理完（已执行 + 漏执行 = 总数）即标记**已完成**；
+     场次详情与历次场次均分开统计**已执行 / 漏执行**数量。
 8. **场次条目修订建议**：排练中发现提示文案需要调整时，不必当场改动剧本提示——
    在执行台点击队列条目的「✏️ 建议」，为**冻结条目**填写新的提示内容和备注：
    - 建议保存在**场次下**（`session_item_suggestions`），刷新页面后仍可查看、修改或删除；
@@ -134,12 +139,14 @@ npm start            # 启动，访问 http://localhost:3000
 - `sessions`：排练场次（创建自哪个剧本版本、名称、条目总数、被排除的待确认提示数）
 - `session_items`：场次冻结条目（序号、来源提示 ID、行号、类型、内容、备注、锚点台词文本）；
   不与 `cues` 建外键，提示日后被编辑或删除不影响旧场次
-- `session_executions`：执行记录（条目、顺序号、执行时间），`(场次, 条目)` 唯一，防止重复执行
+- `session_executions`：处理记录（条目、顺序号、处理时间；`kind` 区分 `done` 正常执行 / `missed` 漏执行，
+  漏执行在 `miss_reason` 记录原因），`(场次, 条目)` 唯一，防止重复处理；正常执行与漏执行共用同一进度序列
 - `session_item_suggestions`：场次条目修订建议（建议的新内容/备注；`pending` / `adopted` / `conflict`
   状态及冲突原因），挂在场次与条目下，随场次级联删除；采纳时事务内核对来源提示与快照一致才回写 `cues`
 
 > 数据库随服务启动自动建表（`CREATE TABLE IF NOT EXISTS`）：旧版本创建的卷在升级后首次启动时
-> 会自动补齐 `session_item_suggestions` 表，无需手工迁移。
+> 会自动补齐 `session_item_suggestions` 表及 `session_executions` 的 `kind` / `miss_reason` 列
+> （已有执行记录默认记为正常执行），无需手工迁移。
 
 ## 排练场次 API
 
@@ -147,10 +154,11 @@ npm start            # 启动，访问 http://localhost:3000
 | --- | --- |
 | `GET /api/scripts/:id/sessions/preview` | 创建前预览：当前版本、可执行条目数、待确认排除数 |
 | `POST /api/scripts/:id/sessions` | 从当前版本创建场次（无可执行提示返回 `409`） |
-| `GET /api/scripts/:id/sessions` | 历次场次列表（含进度摘要与待处理/冲突建议计数） |
-| `GET /api/sessions/:sessionId` | 场次详情：冻结条目快照 + 执行记录 + 修订建议 |
+| `GET /api/scripts/:id/sessions` | 历次场次列表（含已执行/漏执行进度摘要与待处理/冲突建议计数） |
+| `GET /api/sessions/:sessionId` | 场次详情：冻结条目快照 + 处理记录（含漏执行原因）+ 修订建议 |
 | `POST /api/sessions/:sessionId/execute` | 执行队首，请求体 `{ itemId, expectedProgress }`；过期/重复/越序返回 `409` |
-| `POST /api/sessions/:sessionId/undo` | 撤回最后一条，请求体 `{ expectedProgress }` |
+| `POST /api/sessions/:sessionId/miss` | 登记漏执行，请求体 `{ itemId, expectedProgress, reason }`（原因必填）；与执行共用进度校验，过期/重复/越序返回 `409` |
+| `POST /api/sessions/:sessionId/undo` | 撤回最后处理的一条（执行或漏执行），请求体 `{ expectedProgress }` |
 | `POST /api/sessions/:sessionId/items/:itemId/suggestions` | 为冻结条目提交修订建议，请求体 `{ label, note }` |
 | `PATCH /api/suggestions/:suggestionId` | 修改建议内容/备注（仅未采纳；修改后重置为待处理） |
 | `DELETE /api/suggestions/:suggestionId` | 删除建议（已采纳的作为历史保留，返回 `409`） |

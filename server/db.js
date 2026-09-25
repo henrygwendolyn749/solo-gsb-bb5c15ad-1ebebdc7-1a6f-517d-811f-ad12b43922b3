@@ -78,12 +78,15 @@ CREATE TABLE IF NOT EXISTS session_items (
   UNIQUE (session_id, seq)
 );
 
--- 执行记录：只能按队首顺序追加；撤回即删除最后一条
+-- 处理记录：正常执行（done）与漏执行（missed）共用同一进度序列，只能按队首顺序追加；
+-- 撤回即删除最后一条（不论哪种类型）；漏执行必须填写原因（miss_reason）
 CREATE TABLE IF NOT EXISTS session_executions (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   item_id     INTEGER NOT NULL REFERENCES session_items(id) ON DELETE CASCADE,
   seq         INTEGER NOT NULL,
+  kind        TEXT    NOT NULL DEFAULT 'done' CHECK (kind IN ('done', 'missed')),
+  miss_reason TEXT,
   executed_at TEXT    NOT NULL DEFAULT (datetime('now')),
   UNIQUE (session_id, item_id)
 );
@@ -110,6 +113,20 @@ CREATE INDEX IF NOT EXISTS idx_session_exec_session ON session_executions(sessio
 CREATE INDEX IF NOT EXISTS idx_suggestions_session ON session_item_suggestions(session_id);
 CREATE INDEX IF NOT EXISTS idx_suggestions_item ON session_item_suggestions(item_id);
 `);
+
+// 兼容旧库：早期版本的 session_executions 没有 kind / miss_reason 列。
+// CREATE TABLE IF NOT EXISTS 不会改动已存在的表，这里启动时检测并补齐，
+// 已有执行记录默认记为正常执行（kind='done'），无需手工迁移。
+const execCols = db
+  .prepare('PRAGMA table_info(session_executions)')
+  .all()
+  .map((c) => c.name);
+if (!execCols.includes('kind')) {
+  db.exec("ALTER TABLE session_executions ADD COLUMN kind TEXT NOT NULL DEFAULT 'done'");
+}
+if (!execCols.includes('miss_reason')) {
+  db.exec('ALTER TABLE session_executions ADD COLUMN miss_reason TEXT');
+}
 
 module.exports = db;
 module.exports.DB_PATH = DB_PATH;

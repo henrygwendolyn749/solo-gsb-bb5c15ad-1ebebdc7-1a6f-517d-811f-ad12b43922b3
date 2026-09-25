@@ -9,6 +9,7 @@ const state = {
   script: null, // 当前剧本详情 { id, title, content, current_version, cues }
   cueModal: null, // { mode:'add', lineNo } | { mode:'edit', cue }
   suggestModal: null, // { mode:'add', item } | { mode:'edit', suggestion }
+  missModal: null, // { item } 待登记漏执行的队首条目
   rebindCue: null, // 正在重绑的提示
   rebindTarget: null, // 重绑弹窗中暂选行号
   flashLineNo: null, // 渲染后需要高亮的行
@@ -598,6 +599,59 @@ async function handleSuggestionAction(action, btn) {
   }
 }
 
+/* =============================== 漏执行登记 =============================== */
+
+function openMissModal(item) {
+  state.missModal = { item };
+  $('missItemInfo').textContent =
+    `#${item.seq} · 第 ${item.line_no} 行：${item.line_text || ''}　｜　` +
+    `${item.type === 'light' ? '💡 灯光' : '🔊 音效'} ${item.label}`;
+  $('missReason').value = '';
+  $('missModal').classList.remove('hidden');
+  $('missReason').focus();
+}
+
+function closeMissModal() {
+  state.missModal = null;
+  $('missModal').classList.add('hidden');
+}
+
+$('missCancelBtn').addEventListener('click', closeMissModal);
+$('missModal').addEventListener('click', (e) => {
+  if (e.target === $('missModal')) closeMissModal();
+});
+
+$('missSaveBtn').addEventListener('click', async () => {
+  const m = state.missModal;
+  const s = state.run.activeSession;
+  if (!m || !s) return;
+  const reason = $('missReason').value.trim();
+  if (!reason) return toast('请填写漏执行原因', true);
+
+  const btn = $('missSaveBtn');
+  btn.disabled = true;
+  try {
+    // 与正常执行共用同一进度与乐观锁校验
+    await api('POST', `/api/sessions/${s.id}/miss`, {
+      itemId: m.item.id,
+      expectedProgress: s.progress,
+      reason,
+    });
+    closeMissModal();
+    toast('已登记漏执行，继续处理下一条');
+    await refreshActiveSession();
+  } catch (err) {
+    if (err.status === 409) {
+      closeMissModal();
+      handleRunConflict(err);
+    } else {
+      toast(err.message, true);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 /* =============================== 标签页切换 =============================== */
 
 function switchTab(tab) {
@@ -722,7 +776,7 @@ function renderActiveSession() {
       <div class="run-head-line">📖 第 ${head.line_no} 行：${escapeHtml(head.line_text)}</div>
       ${head.note ? `<div class="run-head-note">📝 ${escapeHtml(head.note)}</div>` : ''}
     </div>`
-    : `<div class="run-head run-done">🎉 本场次 ${s.total} 条提示已全部执行完毕</div>`;
+    : `<div class="run-head run-done">🎉 本场次 ${s.total} 条提示已全部处理完毕（已执行 ${s.done_count} · 漏执行 ${s.missed_count}）</div>`;
 
   const sugList = s.suggestions || [];
   const pendingSug = sugList.filter((g) => g.status === 'pending').length;
@@ -733,7 +787,7 @@ function renderActiveSession() {
       <div class="run-session-title">${escapeHtml(s.name)}</div>
       <div class="run-session-meta">
         <span class="badge badge-version">v${s.script_version} 快照</span>
-        <span>共 ${s.total} 条 · 已执行 ${s.progress} 条</span>
+        <span>共 ${s.total} 条 · 已执行 ${s.done_count} 条 · 漏执行 ${s.missed_count} 条</span>
         ${pendingSug ? `<span class="badge badge-sug-pending">💬 待处理建议 ${pendingSug}</span>` : ''}
         ${conflictSug ? `<span class="badge badge-pending">⚠ 冲突建议 ${conflictSug}</span>` : ''}
         ${s.is_complete ? '<span class="badge badge-ok">已完成</span>' : ''}
@@ -751,6 +805,9 @@ function renderActiveSession() {
         ${!head || s.is_complete ? 'disabled' : ''}>
         ▶ 执行队首（#${head ? head.seq : '—'}）
       </button>
+      <button class="btn btn-warn" id="missBtn" ${!head || s.is_complete ? 'disabled' : ''}>
+        ⚠ 登记漏执行
+      </button>
       <button class="btn" id="undoBtn" ${s.progress === 0 ? 'disabled' : ''}>
         ↩ 撤回最后一条
       </button>
@@ -762,12 +819,22 @@ function renderActiveSession() {
       ${s.items
         .map((it) => {
           const isHead = head && it.id === head.id;
-          const cls = it.executed ? 'done' : isHead ? 'head' : 'pending';
-          const stateTag = it.executed
-            ? '<span class="run-tag tag-done">已执行</span>'
-            : isHead
-              ? '<span class="run-tag tag-head">队首</span>'
-              : '<span class="run-tag tag-pending">待执行</span>';
+          const cls =
+            it.status === 'done'
+              ? 'done'
+              : it.status === 'missed'
+                ? 'missed'
+                : isHead
+                  ? 'head'
+                  : 'pending';
+          const stateTag =
+            it.status === 'done'
+              ? '<span class="run-tag tag-done">已执行</span>'
+              : it.status === 'missed'
+                ? '<span class="run-tag tag-missed">漏执行</span>'
+                : isHead
+                  ? '<span class="run-tag tag-head">队首</span>'
+                  : '<span class="run-tag tag-pending">待执行</span>';
           const sugs = it.suggestions || [];
           const sugBadges = renderSugMiniBadges(sugs);
           return `
@@ -784,6 +851,7 @@ function renderActiveSession() {
               <button class="btn btn-sm" data-action="suggest" data-item="${it.id}">✏️ 建议</button>
             </span>
             ${it.note ? `<span class="run-item-note">📝 ${escapeHtml(it.note)}</span>` : ''}
+            ${it.status === 'missed' && it.miss_reason ? `<span class="run-item-note run-item-miss">⚠ 漏执行原因：${escapeHtml(it.miss_reason)}</span>` : ''}
           </div>`;
         })
         .join('')}
@@ -802,27 +870,32 @@ function renderActiveSession() {
     <div class="run-log">
       ${
         s.executions.length === 0
-          ? '<div class="empty" style="padding:12px 0">尚无执行记录。</div>'
+          ? '<div class="empty" style="padding:12px 0">尚无处理记录。</div>'
           : s.executions
               .slice()
               .reverse()
               .map(
                 (e) => `
-            <div class="run-log-row">
+            <div class="run-log-row ${e.kind === 'missed' ? 'is-missed' : ''}">
               <span class="run-log-time">${escapeHtml(e.executed_at)}</span>
               <span class="run-log-idx">#${e.seq}</span>
+              <span class="run-tag ${e.kind === 'missed' ? 'tag-missed' : 'tag-done'}">
+                ${e.kind === 'missed' ? '漏执行' : '已执行'}
+              </span>
               <span class="badge ${e.type === 'light' ? 'badge-light' : 'badge-sound'}">
                 ${e.type === 'light' ? '💡' : '🔊'}
               </span>
               <span class="run-item-label">${escapeHtml(e.label)}</span>
               <span class="run-item-line">第 ${e.line_no} 行</span>
+              ${e.kind === 'missed' && e.miss_reason ? `<span class="run-log-reason">⚠ ${escapeHtml(e.miss_reason)}</span>` : ''}
             </div>`
               )
               .join('')
       }
     </div>`;
 
-  $('executeBtn').addEventListener('click', () => executeItem(head.id));
+  $('executeBtn').addEventListener('click', () => head && executeItem(head.id));
+  $('missBtn').addEventListener('click', () => head && openMissModal(head));
   $('undoBtn').addEventListener('click', undoLast);
 }
 
@@ -953,7 +1026,7 @@ function renderSessionHistory() {
           ${s.is_complete ? '<span class="badge badge-ok">已完成</span>' : ''}
         </div>
         <div class="session-item-meta">
-          v${s.script_version} · ${s.total} 条 · 已执行 ${s.progress} 条（${pct}%）
+          v${s.script_version} · ${s.total} 条 · 已执行 ${s.done_count} · 漏执行 ${s.missed_count}（${pct}%）
           ${s.excluded_pending ? ` · 排除待确认 ${s.excluded_pending} 条` : ''}
           ${s.pending_suggestions ? ` · 💬 待处理建议 ${s.pending_suggestions} 条` : ''}
           ${s.conflict_suggestions ? ` · <span style="color:var(--danger)">⚠ 冲突建议 ${s.conflict_suggestions} 条</span>` : ''}

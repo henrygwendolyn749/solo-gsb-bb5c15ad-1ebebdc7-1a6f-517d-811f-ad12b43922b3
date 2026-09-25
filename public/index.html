@@ -161,6 +161,23 @@
     </div>
   </div>
 
+  <!-- 漏执行登记弹窗（针对队首条目） -->
+  <div id="missModal" class="modal-mask hidden">
+    <div class="modal">
+      <h3>登记漏执行</h3>
+      <div class="modal-line" id="missItemInfo"></div>
+      <p class="hint">
+        该条目将被标记为「漏执行」并继续处理下一条；原因随场次记录保留，可在队列与执行记录中查看。
+      </p>
+      <label class="field-label">漏执行原因（必填）</label>
+      <textarea id="missReason" class="textarea" rows="3" placeholder="如：演员漏词跳过该提示 / 设备未就绪，本次不触发"></textarea>
+      <div class="modal-actions">
+        <button class="btn" id="missCancelBtn">取消</button>
+        <button class="btn btn-warn" id="missSaveBtn">确认登记漏执行</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
 
   <script src="app.js"></script>
