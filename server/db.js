@@ -78,12 +78,15 @@ CREATE TABLE IF NOT EXISTS session_items (
   UNIQUE (session_id, seq)
 );
 
--- 执行记录：只能按队首顺序追加；撤回即删除最后一条
+-- 处理记录：只能按队首顺序追加；撤回即删除最后一条
+-- result：done 为正常执行，missed 为漏执行（附漏执行原因 miss_reason）
 CREATE TABLE IF NOT EXISTS session_executions (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   item_id     INTEGER NOT NULL REFERENCES session_items(id) ON DELETE CASCADE,
   seq         INTEGER NOT NULL,
+  result      TEXT    NOT NULL DEFAULT 'done' CHECK (result IN ('done', 'missed')),
+  miss_reason TEXT,
   executed_at TEXT    NOT NULL DEFAULT (datetime('now')),
   UNIQUE (session_id, item_id)
 );
@@ -110,6 +113,22 @@ CREATE INDEX IF NOT EXISTS idx_session_exec_session ON session_executions(sessio
 CREATE INDEX IF NOT EXISTS idx_suggestions_session ON session_item_suggestions(session_id);
 CREATE INDEX IF NOT EXISTS idx_suggestions_item ON session_item_suggestions(item_id);
 `);
+
+/*
+ * 兼容旧版本创建的数据库：早期 session_executions 只有正常执行记录，
+ * 启动时为其补齐 result / miss_reason 列；已有记录一律视为正常执行。
+ */
+function tableColumns(table) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+}
+
+const execColumns = tableColumns('session_executions');
+if (!execColumns.includes('result')) {
+  db.exec(`ALTER TABLE session_executions ADD COLUMN result TEXT NOT NULL DEFAULT 'done'`);
+}
+if (!execColumns.includes('miss_reason')) {
+  db.exec(`ALTER TABLE session_executions ADD COLUMN miss_reason TEXT`);
+}
 
 module.exports = db;
 module.exports.DB_PATH = DB_PATH;

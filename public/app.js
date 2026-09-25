@@ -722,26 +722,31 @@ function renderActiveSession() {
       <div class="run-head-line">📖 第 ${head.line_no} 行：${escapeHtml(head.line_text)}</div>
       ${head.note ? `<div class="run-head-note">📝 ${escapeHtml(head.note)}</div>` : ''}
     </div>`
-    : `<div class="run-head run-done">🎉 本场次 ${s.total} 条提示已全部执行完毕</div>`;
+    : `<div class="run-head run-done">🎉 本场次 ${s.total} 条提示已全部处理完毕（正常执行 ${s.executed_count} 条 · 漏执行 ${s.missed_count} 条）</div>`;
 
   const sugList = s.suggestions || [];
   const pendingSug = sugList.filter((g) => g.status === 'pending').length;
   const conflictSug = sugList.filter((g) => g.status === 'conflict').length;
+  const donePct = s.total ? (s.executed_count / s.total) * 100 : 0;
+  const missedPct = s.total ? (s.missed_count / s.total) * 100 : 0;
 
   box.innerHTML = `
     <div class="run-session-head">
       <div class="run-session-title">${escapeHtml(s.name)}</div>
       <div class="run-session-meta">
         <span class="badge badge-version">v${s.script_version} 快照</span>
-        <span>共 ${s.total} 条 · 已执行 ${s.progress} 条</span>
+        <span>共 ${s.total} 条 · 已处理 ${s.progress} 条</span>
+        <span style="color:var(--ok)">正常执行 ${s.executed_count}</span>
+        <span style="color:${s.missed_count ? 'var(--danger)' : 'var(--text-dim)'}">漏执行 ${s.missed_count}</span>
         ${pendingSug ? `<span class="badge badge-sug-pending">💬 待处理建议 ${pendingSug}</span>` : ''}
         ${conflictSug ? `<span class="badge badge-pending">⚠ 冲突建议 ${conflictSug}</span>` : ''}
         ${s.is_complete ? '<span class="badge badge-ok">已完成</span>' : ''}
       </div>
     </div>
 
-    <div class="run-progress-bar">
-      <div class="run-progress-fill" style="width:${s.total ? (s.progress / s.total) * 100 : 0}%"></div>
+    <div class="run-progress-bar" title="正常执行 ${s.executed_count} 条 · 漏执行 ${s.missed_count} 条">
+      <div class="run-progress-done" style="width:${donePct}%"></div>
+      <div class="run-progress-missed" style="width:${missedPct}%"></div>
     </div>
 
     ${headItem}
@@ -750,6 +755,10 @@ function renderActiveSession() {
       <button class="btn btn-primary" id="executeBtn"
         ${!head || s.is_complete ? 'disabled' : ''}>
         ▶ 执行队首（#${head ? head.seq : '—'}）
+      </button>
+      <button class="btn btn-miss" id="missBtn"
+        ${!head || s.is_complete ? 'disabled' : ''}>
+        ⚠ 无法执行，登记漏执行（#${head ? head.seq : '—'}）
       </button>
       <button class="btn" id="undoBtn" ${s.progress === 0 ? 'disabled' : ''}>
         ↩ 撤回最后一条
@@ -762,12 +771,15 @@ function renderActiveSession() {
       ${s.items
         .map((it) => {
           const isHead = head && it.id === head.id;
-          const cls = it.executed ? 'done' : isHead ? 'head' : 'pending';
-          const stateTag = it.executed
-            ? '<span class="run-tag tag-done">已执行</span>'
-            : isHead
-              ? '<span class="run-tag tag-head">队首</span>'
-              : '<span class="run-tag tag-pending">待执行</span>';
+          const cls = it.result === 'missed' ? 'missed' : it.result === 'done' ? 'done' : isHead ? 'head' : 'pending';
+          const stateTag =
+            it.result === 'missed'
+              ? '<span class="run-tag tag-missed">漏执行</span>'
+              : it.result === 'done'
+                ? '<span class="run-tag tag-done">已执行</span>'
+                : isHead
+                  ? '<span class="run-tag tag-head">队首</span>'
+                  : '<span class="run-tag tag-pending">待执行</span>';
           const sugs = it.suggestions || [];
           const sugBadges = renderSugMiniBadges(sugs);
           return `
@@ -784,6 +796,11 @@ function renderActiveSession() {
               <button class="btn btn-sm" data-action="suggest" data-item="${it.id}">✏️ 建议</button>
             </span>
             ${it.note ? `<span class="run-item-note">📝 ${escapeHtml(it.note)}</span>` : ''}
+            ${
+              it.result === 'missed' && it.miss_reason
+                ? `<span class="run-item-miss-reason">⚠ 漏执行原因：${escapeHtml(it.miss_reason)}</span>`
+                : ''
+            }
           </div>`;
         })
         .join('')}
@@ -798,31 +815,42 @@ function renderActiveSession() {
       }
     </div>
 
-    <h4 class="run-subhead">执行记录</h4>
+    <h4 class="run-subhead">处理记录</h4>
     <div class="run-log">
       ${
         s.executions.length === 0
-          ? '<div class="empty" style="padding:12px 0">尚无执行记录。</div>'
+          ? '<div class="empty" style="padding:12px 0">尚无处理记录。</div>'
           : s.executions
               .slice()
               .reverse()
               .map(
                 (e) => `
-            <div class="run-log-row">
+            <div class="run-log-row ${e.result === 'missed' ? 'is-missed' : ''}">
               <span class="run-log-time">${escapeHtml(e.executed_at)}</span>
               <span class="run-log-idx">#${e.seq}</span>
+              ${
+                e.result === 'missed'
+                  ? '<span class="run-tag tag-missed">漏执行</span>'
+                  : '<span class="run-tag tag-done">已执行</span>'
+              }
               <span class="badge ${e.type === 'light' ? 'badge-light' : 'badge-sound'}">
                 ${e.type === 'light' ? '💡' : '🔊'}
               </span>
               <span class="run-item-label">${escapeHtml(e.label)}</span>
               <span class="run-item-line">第 ${e.line_no} 行</span>
+              ${
+                e.result === 'missed' && e.miss_reason
+                  ? `<span class="run-log-reason">⚠ ${escapeHtml(e.miss_reason)}</span>`
+                  : ''
+              }
             </div>`
               )
               .join('')
       }
     </div>`;
 
-  $('executeBtn').addEventListener('click', () => executeItem(head.id));
+  $('executeBtn').addEventListener('click', () => executeItem(head.id, 'done'));
+  $('missBtn').addEventListener('click', () => executeItem(head.id, 'missed'));
   $('undoBtn').addEventListener('click', undoLast);
 }
 
@@ -881,13 +909,34 @@ function renderSuggestionCard(g) {
   </div>`;
 }
 
-async function executeItem(itemId) {
+/**
+ * 处理队首：result='done' 正常执行；result='missed' 时舞台监督先填写漏执行原因。
+ * 两者共用同一接口与预期进度乐观锁，成功后自动推进到下一条。
+ */
+async function executeItem(itemId, result) {
   const s = state.run.activeSession;
   const expectedProgress = s.progress;
-  const btn = $('executeBtn');
+  let missReason = null;
+
+  if (result === 'missed') {
+    const input = prompt('该提示无法按计划执行，请填写漏执行原因（将标记为漏执行并继续处理下一条）：');
+    if (input === null) return; // 取消登记
+    missReason = input.trim();
+    if (!missReason) {
+      toast('漏执行原因不能为空', true);
+      return;
+    }
+  }
+
+  const btn = result === 'missed' ? $('missBtn') : $('executeBtn');
   btn.disabled = true;
   try {
-    await api('POST', `/api/sessions/${s.id}/execute`, { itemId, expectedProgress });
+    await api(
+      'POST',
+      `/api/sessions/${s.id}/execute`,
+      result === 'missed' ? { itemId, expectedProgress, result, missReason } : { itemId, expectedProgress }
+    );
+    if (result === 'missed') toast('已登记漏执行，继续处理下一条');
     await refreshActiveSession();
   } catch (err) {
     handleRunConflict(err);
@@ -953,7 +1002,9 @@ function renderSessionHistory() {
           ${s.is_complete ? '<span class="badge badge-ok">已完成</span>' : ''}
         </div>
         <div class="session-item-meta">
-          v${s.script_version} · ${s.total} 条 · 已执行 ${s.progress} 条（${pct}%）
+          v${s.script_version} · ${s.total} 条 · 已处理 ${s.progress} 条（${pct}%）
+          · <span style="color:var(--ok)">正常执行 ${s.executed_count || 0}</span>
+          · <span style="color:${s.missed_count ? 'var(--danger)' : 'var(--text-dim)'}">漏执行 ${s.missed_count || 0}</span>
           ${s.excluded_pending ? ` · 排除待确认 ${s.excluded_pending} 条` : ''}
           ${s.pending_suggestions ? ` · 💬 待处理建议 ${s.pending_suggestions} 条` : ''}
           ${s.conflict_suggestions ? ` · <span style="color:var(--danger)">⚠ 冲突建议 ${s.conflict_suggestions} 条</span>` : ''}

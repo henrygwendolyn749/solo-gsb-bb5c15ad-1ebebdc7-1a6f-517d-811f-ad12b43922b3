@@ -112,6 +112,8 @@ body {
 .btn-primary:hover { background: var(--primary-hover); }
 .btn-ghost { background: transparent; }
 .btn-warn { color: var(--light-cue); border-color: var(--light-cue); }
+.btn-miss { color: var(--danger); border-color: var(--danger); }
+.btn-miss:hover { background: var(--danger-bg); }
 .btn-sm { padding: 4px 10px; font-size: 12.5px; }
 .btn-danger { color: var(--danger); }
 
@@ -389,11 +391,16 @@ body {
   border-radius: 999px;
   overflow: hidden;
   margin-bottom: 14px;
+  display: flex;
 }
-.run-progress-fill {
+.run-progress-done {
   height: 100%;
-  background: var(--primary);
-  border-radius: 999px;
+  background: var(--ok);
+  transition: width 0.25s ease;
+}
+.run-progress-missed {
+  height: 100%;
+  background: var(--danger);
   transition: width 0.25s ease;
 }
 
@@ -438,12 +445,19 @@ body {
   flex-wrap: wrap;
 }
 .run-item.done { opacity: 0.5; text-decoration: line-through; border-left-color: var(--ok); }
+.run-item.missed { border-color: var(--danger); border-left-color: var(--danger); background: var(--danger-bg); }
 .run-item.head { border-color: var(--primary); border-left-color: var(--primary); background: rgba(124, 108, 240, 0.1); }
 .run-item.pending { border-left-color: var(--border); }
 .run-item-idx { color: var(--text-dim); font-weight: 700; min-width: 34px; }
 .run-item-line { color: var(--text-dim); font-size: 12.5px; }
 .run-item-label { font-weight: 600; }
 .run-item-note { color: var(--text-dim); font-size: 12.5px; width: 100%; padding-left: 44px; }
+.run-item-miss-reason {
+  flex-basis: 100%;
+  color: var(--danger);
+  font-size: 12.5px;
+  padding-left: 44px;
+}
 
 .run-tag {
   font-size: 11px;
@@ -452,6 +466,7 @@ body {
   padding: 1px 8px;
 }
 .tag-done { background: rgba(52, 211, 153, 0.14); color: var(--ok); }
+.tag-missed { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }
 .tag-head { background: rgba(124, 108, 240, 0.2); color: var(--primary); }
 .tag-pending { background: var(--bg-panel-2); color: var(--text-dim); }
 .tag-sug-pending { background: rgba(124, 108, 240, 0.2); color: var(--primary); }
@@ -508,7 +523,10 @@ body {
   border-radius: 6px;
   padding: 6px 12px;
   font-size: 13px;
+  flex-wrap: wrap;
 }
+.run-log-row.is-missed { border-color: var(--danger); background: var(--danger-bg); }
+.run-log-reason { color: var(--danger); font-size: 12.5px; flex-basis: 100%; padding-left: 4px; }
 .run-log-time { color: var(--text-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
 .run-log-idx { color: var(--text-dim); font-weight: 700; }
 

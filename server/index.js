@@ -302,14 +302,14 @@ function countPendingCues(scriptId) {
     .get(scriptId).n;
 }
 
-/** 组装场次完整状态（含冻结条目快照、进度、执行记录与修订建议） */
+/** 组装场次完整状态（含冻结条目快照、进度、处理记录与修订建议） */
 function serializeSession(session) {
   const items = db
     .prepare('SELECT * FROM session_items WHERE session_id = ? ORDER BY seq ASC')
     .all(session.id);
   const execs = db
     .prepare(
-      `SELECT e.id, e.item_id, e.seq, e.executed_at,
+      `SELECT e.id, e.item_id, e.seq, e.result, e.miss_reason, e.executed_at,
               i.line_no, i.type, i.label, i.line_text
        FROM session_executions e
        JOIN session_items i ON i.id = e.item_id
@@ -327,22 +327,34 @@ function serializeSession(session) {
        ORDER BY g.id ASC`
     )
     .all(session.id);
-  const executedItemIds = new Set(execs.map((x) => x.item_id));
+  // 条目 -> 最近一条处理记录（撤回后无记录；(场次,条目) 唯一，至多一条）
+  const execByItem = new Map(execs.map((x) => [x.item_id, x]));
   const sugByItem = new Map();
   for (const g of suggestions) {
     if (!sugByItem.has(g.item_id)) sugByItem.set(g.item_id, []);
     sugByItem.get(g.item_id).push(g);
   }
 
+  const executedCount = execs.filter((x) => x.result === 'done').length;
+  const missedCount = execs.filter((x) => x.result === 'missed').length;
+
   return {
     ...session,
-    progress: execs.length,
+    progress: execs.length, // 已处理条数（正常执行 + 漏执行共用同一进度）
+    executed_count: executedCount,
+    missed_count: missedCount,
     is_complete: execs.length >= session.total,
-    items: items.map((it) => ({
-      ...it,
-      executed: executedItemIds.has(it.id),
-      suggestions: sugByItem.get(it.id) || [],
-    })),
+    items: items.map((it) => {
+      const rec = execByItem.get(it.id) || null;
+      return {
+        ...it,
+        executed: !!rec, // 已处理（含正常执行与漏执行）
+        result: rec ? rec.result : null,
+        miss_reason: rec ? rec.miss_reason : null,
+        processed_at: rec ? rec.executed_at : null,
+        suggestions: sugByItem.get(it.id) || [],
+      };
+    }),
     executions: execs,
     suggestions,
   };
@@ -406,13 +418,17 @@ app.post('/api/scripts/:id/sessions', (req, res) => {
   res.status(201).json({ id: sessionId });
 });
 
-// 场次列表（进度摘要 + 修订建议状态计数）
+// 场次列表（进度摘要：已执行/漏执行计数 + 修订建议状态计数）
 app.get('/api/scripts/:id/sessions', (req, res) => {
   getScriptOr404(req.params.id);
   const sessions = db
     .prepare(
       `SELECT s.*,
               (SELECT COUNT(*) FROM session_executions e WHERE e.session_id = s.id) AS progress,
+              (SELECT COUNT(*) FROM session_executions e
+                WHERE e.session_id = s.id AND e.result = 'done') AS executed_count,
+              (SELECT COUNT(*) FROM session_executions e
+                WHERE e.session_id = s.id AND e.result = 'missed') AS missed_count,
               (SELECT COUNT(*) FROM session_item_suggestions g
                 WHERE g.session_id = s.id AND g.status = 'pending') AS pending_suggestions,
               (SELECT COUNT(*) FROM session_item_suggestions g
@@ -431,19 +447,31 @@ app.get('/api/sessions/:sessionId', (req, res) => {
   res.json(serializeSession(getSessionOr404(req.params.sessionId)));
 });
 
-// 执行队首条目：提交目标条目与预期进度做乐观锁校验
+/**
+ * 处理队首条目（正常执行 / 漏执行共用同一套校验）：
+ * 提交目标条目与预期进度做乐观锁校验，result 缺省为 done；
+ * result=missed 时必须填写漏执行原因。重复提交、越序或过期请求一律 409。
+ */
 app.post('/api/sessions/:sessionId/execute', (req, res) => {
   const session = getSessionOr404(req.params.sessionId);
   const itemId = Number(req.body.itemId);
   const expectedProgress = Number(req.body.expectedProgress);
+  const result = req.body.result === undefined ? 'done' : String(req.body.result);
   if (!Number.isInteger(itemId) || itemId <= 0) {
-    return res.status(400).json({ error: '缺少要执行的目标条目' });
+    return res.status(400).json({ error: '缺少要处理的目标条目' });
   }
   if (!Number.isInteger(expectedProgress) || expectedProgress < 0) {
     return res.status(400).json({ error: '缺少预期进度 expectedProgress' });
   }
+  if (result !== 'done' && result !== 'missed') {
+    return res.status(400).json({ error: '处理结果 result 必须为 done（正常执行）或 missed（漏执行）' });
+  }
+  const missReason = result === 'missed' ? String(req.body.missReason || '').trim() : null;
+  if (result === 'missed' && !missReason) {
+    return res.status(400).json({ error: '登记漏执行必须填写原因' });
+  }
 
-  const result = db.transaction(() => {
+  const out = db.transaction(() => {
     const done = db
       .prepare('SELECT COUNT(*) AS n FROM session_executions WHERE session_id = ?')
       .get(session.id).n;
@@ -453,36 +481,37 @@ app.post('/api/sessions/:sessionId/execute', (req, res) => {
       throw conflict('场次进度已变化，请刷新后重试（你的请求已过期）');
     }
     if (done >= session.total) {
-      throw conflict('本场次已全部执行完毕，不能推进下一条');
+      throw conflict('本场次已全部处理完毕，不能推进下一条');
     }
 
-    // 一次只能执行队首
+    // 一次只能处理队首
     const head = db
       .prepare('SELECT * FROM session_items WHERE session_id = ? ORDER BY seq ASC LIMIT 1 OFFSET ?')
       .get(session.id, done);
-    if (!head) throw conflict('找不到下一条可执行条目');
+    if (!head) throw conflict('找不到下一条可处理条目');
     if (head.id !== itemId) {
-      throw conflict('只能执行队首条目，不能跳过或乱序执行');
+      throw conflict('只能处理队首条目，不能跳过或乱序处理');
     }
 
     try {
       db.prepare(
-        'INSERT INTO session_executions (session_id, item_id, seq) VALUES (?, ?, ?)'
-      ).run(session.id, head.id, done + 1);
+        `INSERT INTO session_executions (session_id, item_id, seq, result, miss_reason)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(session.id, head.id, done + 1, result, missReason);
     } catch (err) {
-      // UNIQUE 冲突 = 该条目已执行（重复请求）
+      // UNIQUE 冲突 = 该条目已处理（重复请求，无论上次是正常执行还是漏执行）
       if (String(err.message).includes('UNIQUE')) {
-        throw conflict('该条目已执行，请勿重复提交');
+        throw conflict('该条目已处理，请勿重复提交');
       }
       throw err;
     }
-    return done + 1;
+    return { progress: done + 1, result };
   })();
 
-  res.json({ ok: true, progress: result });
+  res.json({ ok: true, ...out });
 });
 
-// 撤回最后执行的一条（同样带乐观锁）
+// 撤回最后一条处理记录（正常执行或漏执行均可撤回；撤回后该条回到待处理，同样带乐观锁）
 app.post('/api/sessions/:sessionId/undo', (req, res) => {
   const session = getSessionOr404(req.params.sessionId);
   const expectedProgress = Number(req.body.expectedProgress);
@@ -497,7 +526,7 @@ app.post('/api/sessions/:sessionId/undo', (req, res) => {
          ORDER BY seq DESC LIMIT 1`
       )
       .get(session.id);
-    if (!last) throw conflict('没有可撤回的执行记录');
+    if (!last) throw conflict('没有可撤回的处理记录');
 
     const done = db
       .prepare('SELECT COUNT(*) AS n FROM session_executions WHERE session_id = ?')
@@ -507,10 +536,10 @@ app.post('/api/sessions/:sessionId/undo', (req, res) => {
     }
 
     db.prepare('DELETE FROM session_executions WHERE id = ?').run(last.id);
-    return done - 1;
+    return { progress: done - 1, undone_result: last.result };
   })();
 
-  res.json({ ok: true, progress: result });
+  res.json({ ok: true, ...result });
 });
 
 /* ----------------------------- 场次条目修订建议 ----------------------------- */
